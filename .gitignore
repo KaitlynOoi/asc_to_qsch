@@ -1,0 +1,16 @@
+# PyInstaller intermediate build artifacts -- regenerate with:
+#   python -m PyInstaller newtool.spec --noconfirm
+build/
+*.spec.bak
+
+# Python bytecode caches
+__pycache__/
+*.pyc
+
+# Built binary deliverable -- not committed to keep the repo small and
+# diffable; rebuild from source (see HANDOFF.md section 7).
+dist/
+
+# Editor/OS cruft
+.DS_Store
+Thumbs.db
