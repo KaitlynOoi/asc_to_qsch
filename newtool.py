@@ -5587,18 +5587,6 @@ def run_gui():
             messagebox.showinfo(
                 "Done", f"Finished!\nSaved to:\n{qsch_file}", parent=root
             )
-            if messagebox.askyesno(
-                "View file?",
-                f"Open the converted file now?\n\n{qsch_file}",
-                parent=root,
-            ):
-                try:
-                    os.startfile(qsch_file)
-                except Exception as exc:
-                    log(f"  NOTE: could not open {qsch_file} automatically: {exc}")
-                    messagebox.showerror(
-                        "Could not open file", str(exc), parent=root
-                    )
 
     action_row = ttk.Frame(main)
     action_row.grid(row=2, column=0, sticky="w", pady=(10, 0))
@@ -5665,7 +5653,7 @@ def run_cli_combined(argv: Optional[List[str]] = None) -> int:
         None if args.no_device_model_fix else choose_device_model_cli
     )
 
-    result = process_models(
+    process_models(
         asc_file=asc_file,
         qsch_file=qsch_file,
         search_roots=search_roots,
@@ -5678,15 +5666,6 @@ def run_cli_combined(argv: Optional[List[str]] = None) -> int:
         review_choices=review_choices_cli,
         confirm_before_generating=confirm_and_generate_cli,
     )
-
-    if not result.cancelled:
-        answer = input(f"\nOpen the converted file now? [y/N]: ").strip().lower()
-        if answer == "y":
-            try:
-                os.startfile(qsch_file)
-            except Exception as exc:
-                print(f"  NOTE: could not open {qsch_file} automatically: {exc}")
-
     return 0
 
 
