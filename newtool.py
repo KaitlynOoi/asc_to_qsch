@@ -2520,9 +2520,21 @@ def _build_qsch_wire_graph(qsch_editor):
 
 def _rotate_local_offset(local_xy: Tuple[int, int], orientation: int) -> Tuple[int, int]:
     """Rotates/mirrors a symbol-local (x, y) offset by a QSCH orientation
-    code (0-7: 0/1/2/3 = 0/90/180/270 degrees, 4-7 = the same four mirrored)
-    and returns the transformed offset, ready to add to a component's own
-    placement position to get an absolute coordinate.
+    code and returns the transformed offset, ready to add to a component's
+    own placement position to get an absolute coordinate.
+
+    QSCH's real orientation range is 0-15, NOT 0-7 as an earlier version of
+    this function assumed: 0-7 are the four 0/90/180/270-degree rotations
+    plus their mirrored counterparts, but 8-15 are a SEPARATE mirror
+    variant (mirrored across the X axis) with the X-offset's sign flipped
+    relative to the 0-7 case -- confirmed directly from spicelib's own
+    QschEditor._find_pin_position, which is the actual ground truth QSpice
+    itself was built against. The earlier 0-7-only version silently
+    computed a wrong (unflipped) position for any orientation of 8 or
+    above -- confirmed on a real circuit: resistor R34 at orientation 8
+    resolved to a position 200 units off from either of its real wire
+    endpoints, causing this function's caller to treat a genuinely-wired
+    pin as unconnected.
 
     Reimplements the same rotation convention QschEditor's own internal
     pin-position lookup uses, without that method's rounding to the
@@ -2535,10 +2547,18 @@ def _rotate_local_offset(local_xy: Tuple[int, int], orientation: int) -> Tuple[i
     hyp = math.hypot(x, y)
     if hyp == 0:
         return (0, 0)
-    theta = math.atan2(y, x) + math.radians(orientation * 45)
-    if orientation % 2:
+    if not (0 <= orientation <= 15):
+        raise ValueError(f"Invalid orientation: {orientation}")
+    mirrored = orientation >= 8
+    base = orientation - 8 if mirrored else orientation
+    theta = math.atan2(y, x) + math.radians(base * 45)
+    if base % 2:
         hyp *= 1.41421356237
-    return (int(round(hyp * math.cos(theta))), int(round(hyp * math.sin(theta))))
+    dx = hyp * math.cos(theta)
+    dy = hyp * math.sin(theta)
+    if mirrored:
+        dx = -dx
+    return (int(round(dx)), int(round(dy)))
 
 
 def _compute_schematic_bounds(qsch_editor) -> Tuple[int, int, int, int]:
