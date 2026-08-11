@@ -24,8 +24,11 @@ from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple
 # as "spicelib_vendor", never "spicelib", so this can never be silently
 # shadowed by (or confused with) a pip-installed spicelib package that
 # might also be present. Keeps this tool working even if the upstream
-# spicelib GitHub repo/PyPI package ever goes away.
-import spicelib_vendor as spicelib
+# spicelib GitHub repo/PyPI package ever goes away. Every class actually
+# used below is imported explicitly by name from its real submodule (e.g.
+# RawRead is imported directly at its one point of use further down) --
+# there is no top-level "import spicelib_vendor" of any kind, aliased or
+# not, since nothing in this file ever needs the package object itself.
 from spicelib_vendor.editor.spice_editor import SpiceCircuit
 
 # --- Compatibility Patch for spicelib version mismatches ---
@@ -96,7 +99,7 @@ def _corrected_asy_to_qsch(self, *args):
     spice_prefix = self.attributes['Prefix']
     symbol = _QschTagForAsyPatch("symbol", spice_prefix[0])
     symbol.items.append(_QschTagForAsyPatch("type:", spice_prefix))
-    symbol.items.append(_QschTagForAsyPatch("description:", self.attributes["Description"]))
+    symbol.items.append(_QschTagForAsyPatch("description:", self.attributes.get("Description", "")))
     symbol.items.append(_QschTagForAsyPatch("shorted pins:", "false"))
 
     for line in self.lines:
@@ -169,7 +172,41 @@ def _corrected_asy_to_qsch(self, *args):
         )
         symbol.items.append(text)
 
-    for pin in self.pins:
+    # LTspice's .asy PIN entries are declared in whatever order is visually
+    # convenient for the symbol artwork -- not necessarily the order the
+    # underlying .SUBCKT/.MODEL expects. LTspice itself corrects for this
+    # using the optional "PINATTR SpiceOrder n" attribute on each pin (per
+    # LTwiki: if present, it -- not drawing order -- determines the node
+    # order used when generating the SPICE X-line; if omitted on a pin,
+    # drawing order is used). spicelib's upstream to_qsch() parses
+    # SpiceOrder into each pin's attr_dict but never reads it back out, so
+    # every converted symbol emitted its \u00abpin\u00bb tags in raw drawing order.
+    # Confirmed with a real AD743 test conversion: our own netlist generator
+    # emitted "U1 MINUSIN PLUSIN ..." (drawing order: -IN then +IN) instead
+    # of the "+IN -IN ..." order AD743's real .SUBCKT requires -- silently
+    # swapping the op-amp's inverting/non-inverting inputs. A library scan
+    # found this affects the majority of real op-amp/comparator .asy files
+    # (e.g. AD743, LM393, OPA170 all declare -IN before +IN but give +IN the
+    # lower SpiceOrder), so this is corrected generally here rather than for
+    # any one part. Only reorders when every pin on the symbol declares a
+    # SpiceOrder; if any pin omits it, drawing order is kept, matching
+    # LTspice's own fallback so partially-annotated symbols aren't scrambled.
+    def _pin_spice_order(pin):
+        for pair in pin.text.split(";"):
+            if pair.startswith("SpiceOrder="):
+                try:
+                    return int(pair.split("=", 1)[1])
+                except ValueError:
+                    return None
+        return None
+
+    _pin_orders = [_pin_spice_order(p) for p in self.pins]
+    if self.pins and all(o is not None for o in _pin_orders):
+        ordered_pins = [p for _, p in sorted(zip(_pin_orders, self.pins), key=lambda t: t[0])]
+    else:
+        ordered_pins = self.pins
+
+    for pin in ordered_pins:
         coord = pin.coord
         attr_dict = {}
         for pair in pin.text.split(";"):
@@ -3530,14 +3567,11 @@ def process_models(
                 f"but no .lib will be imported for it."
             )
 
-    if review_choices is not None and missing_by_model:
-        def _redo_lib_choice(model: str) -> Optional[str]:
-            chosen = choose_model_path(model, find_model_candidates(model, all_roots))
-            return _clean_path(chosen) if chosen else None
-
-        resolved_paths = review_choices(
-            "library imports", dict(missing_by_model), resolved_paths, _redo_lib_choice
-        )
+    def _redo_lib_choice(model: str) -> Optional[str]:
+        chosen = choose_model_path(model, find_model_candidates(model, all_roots))
+        return _clean_path(chosen) if chosen else None
+    # Reviewed together with device models below, in one combined pass --
+    # see the single review_choices call after device models are gathered.
 
     qsch_editor = QschEditor(qsch_file)
 
@@ -3576,6 +3610,7 @@ def process_models(
     device_models_injected = 0
     device_models_skipped: List[str] = []
     device_choices: Dict[str, dict] = {}
+    reviewable_device_models: Dict[str, list] = {}
     log("")
     log("=" * 60)
     log("UNRESOLVED COMPONENT MODELS (Diodes / BJTs / MOSFETs / Subcircuits)")
@@ -3592,7 +3627,6 @@ def process_models(
             log("  No device-model chooser was provided; skipping this step.")
             device_models_skipped = sorted(unresolved_device_models.keys())
         else:
-            reviewable_device_models: Dict[str, list] = {}
             for model in sorted(unresolved_device_models.keys()):
                 refs = unresolved_device_models[model]
                 log(f"--- {model} (used by {len(refs)} component(s)) ---")
@@ -3629,19 +3663,64 @@ def process_models(
                 candidates = find_model_candidates(model, all_roots)
                 device_choices[model] = choose_device_model(model, candidates, refs)
 
-            if review_choices is not None and reviewable_device_models:
-                def _redo_device_choice(model: str) -> Optional[dict]:
-                    refs = reviewable_device_models[model]
-                    return choose_device_model(
-                        model, find_model_candidates(model, all_roots), refs
-                    )
+    def _redo_device_choice(model: str) -> Optional[dict]:
+        refs = reviewable_device_models[model]
+        return choose_device_model(
+            model, find_model_candidates(model, all_roots), refs
+        )
 
-                device_choices = review_choices(
-                    "device models",
-                    reviewable_device_models,
-                    device_choices,
-                    _redo_device_choice,
-                )
+    # One combined review pass for both library imports and device models,
+    # instead of two separate back-to-back review screens. The two stayed
+    # structurally different underneath on purpose -- a library import
+    # resolves to a plain file path (injected as a ".lib \"path\"" line)
+    # while a device model resolves to a dict describing an extracted/
+    # edited model card (injected as the card itself) -- but there was no
+    # real reason to also split the *review UX* into two passes the user
+    # has to step through one after another; that was reported as
+    # confusing/inaccurate (easy to lose track of which screen a given
+    # model belongs to) without changing what's actually correct here.
+    # Keys are merged as-is; on the rare case a bare model name is used as
+    # both a missing subcircuit AND a missing device model in the same
+    # circuit, the device-model entry gets a suffixed key so neither is
+    # silently dropped from the combined list.
+    if review_choices is not None and (missing_by_model or reviewable_device_models):
+        combined_items: Dict[str, list] = dict(missing_by_model)
+        combined_choices: dict = dict(resolved_paths)
+        key_to_model: Dict[str, Tuple[str, str]] = {
+            model: ("library", model) for model in missing_by_model
+        }
+        for model, refs in reviewable_device_models.items():
+            key = model if model not in combined_items else f"{model} [device model]"
+            combined_items[key] = refs
+            combined_choices[key] = device_choices.get(model)
+            key_to_model[key] = ("device", model)
+
+        def _redo_combined(key: str):
+            kind, model = key_to_model[key]
+            return _redo_lib_choice(model) if kind == "library" else _redo_device_choice(model)
+
+        combined_choices = review_choices(
+            "library imports and device models",
+            combined_items,
+            combined_choices,
+            _redo_combined,
+        )
+
+        resolved_paths = {}
+        device_choices = {}
+        for key, choice in combined_choices.items():
+            kind, model = key_to_model[key]
+            if kind == "library":
+                # resolved_paths only ever holds models with a real chosen
+                # path (a skipped library import is simply absent as a key,
+                # never present with None) -- the unguarded injection loop
+                # further down assumes that invariant, so it's preserved
+                # here rather than letting a redo-to-nothing add a None
+                # entry the way review_choices' generic dict merge would.
+                if choice:
+                    resolved_paths[model] = choice
+            else:
+                device_choices[model] = choice
 
     # ---- Apply everything: library imports (resolved_paths) and device
     # models (device_choices) together, after both categories have been
@@ -4301,13 +4380,47 @@ def _patch_asc_editor_symbol_lookup():
                 f"placeholder if still unresolved."
             )
             return _MissingSymbolStub()
+        except Exception as exc:
+            # A .asy file with a matching name was found here, but spicelib
+            # couldn't parse it at all (e.g. NotImplementedError on an
+            # unsupported drawing primitive) -- this is exactly the "symbol
+            # that can't even be opened in LTspice" case: a genuinely
+            # malformed/nonstandard file. Only FileNotFoundError was being
+            # caught here, so any other parse failure crashed the whole
+            # conversion during AscEditor's own constructor, before the
+            # main symbol-resolution loop (which has its own matching
+            # fallback further down) ever got a chance to run. Treating it
+            # the same as "not found" restores the original behavior this
+            # tool is meant to have -- still convert with a placeholder,
+            # then let the user supply a library for it during model
+            # fixup -- for any symbol this can't fully parse, not just ones
+            # it can't locate.
+            print(
+                f"  NOTE: found a .asy for symbol type '{symbol}' but could not "
+                f"parse it ({exc}) -- treating as unresolved and using a "
+                f"placeholder if still unresolved after the full search below."
+            )
+            return _MissingSymbolStub()
 
     AscEditor._get_symbol = patched
 
 
 def _default_search_paths(asc_file, extra_paths):
-    return extra_paths + [
-        os.path.split(asc_file)[0],
+    # Step 2 (model/.lib fix-up) already searches the broad root list from
+    # get_default_search_roots() -- which recursively covers Documents,
+    # Desktop, and Downloads, not just LTspice's own install paths -- but
+    # step 1 (.asy symbol resolution, here) used a much narrower list of
+    # fixed LTspice-only paths. That mismatch was a real, confirmed bug: a
+    # real circuit's AD826A.asy (living in a manufacturer-supplied symbol
+    # dropped in ~/Documents, not any LTspice-standard folder) silently
+    # failed to resolve in step 1, producing a blank/pinless placeholder
+    # box in the converted schematic -- while a hypothetical step-2-only
+    # search would have found it. Folding get_default_search_roots() in
+    # here keeps both steps consistent and searching the same real-world
+    # locations, recursively (os.walk under each root, see
+    # find_file_in_directory), instead of maintaining two different guesses
+    # about where a user's custom symbols might live.
+    return extra_paths + get_default_search_roots(asc_file) + [
         os.path.expanduser("~/AppData/Local/LTspice/lib/sym"),
         os.path.expanduser("~/Documents/LtspiceXVII/lib/sym"),
         os.path.expanduser("~/Library/Application Support/LTspice/lib/sym"),
@@ -5036,6 +5149,7 @@ def convert_asc_to_qsch(asc_file, qsch_file, search_paths=None, log=None):
     )
 
     asy_reader_cache = {}
+    unusable_asy_files: Set[str] = set()
 
     total = 0
     converted = 0
@@ -5083,7 +5197,7 @@ def convert_asc_to_qsch(asc_file, qsch_file, search_paths=None, log=None):
         asy_reader = asy_reader_cache.get(comp.symbol, None)
         resolved_from = "cache" if asy_reader is not None else None
 
-        if asy_reader is None:
+        if asy_reader is None and comp.symbol not in unusable_asy_files:
             for sym_root in all_search_paths:
                 if not sym_root or not os.path.exists(sym_root):
                     continue
@@ -5091,9 +5205,34 @@ def convert_asc_to_qsch(asc_file, qsch_file, search_paths=None, log=None):
                     sym_root, comp.symbol + ".asy"
                 )
                 if symbol_asy_file is not None:
-                    asy_reader = AsyReader(symbol_asy_file)
-                    asy_reader_cache[comp.symbol] = asy_reader
-                    resolved_from = symbol_asy_file
+                    try:
+                        asy_reader = AsyReader(symbol_asy_file)
+                        asy_reader_cache[comp.symbol] = asy_reader
+                        resolved_from = symbol_asy_file
+                    except Exception as exc:
+                        # A file with the right name was found, but spicelib
+                        # couldn't parse or convert it -- most often a
+                        # genuinely malformed/nonstandard .asy that LTspice
+                        # itself can't open either (unsupported primitive,
+                        # bad encoding, ...). This used to crash the whole
+                        # conversion outright, since nothing downstream of
+                        # this loop caught it. Falling through to the same
+                        # placeholder path used for "no .asy found at all"
+                        # instead: the component still gets a real reference
+                        # designator, value, and reference box in the
+                        # converted schematic, and (like any other
+                        # unresolved model) still gets offered to the user
+                        # for a manual .lib pick in the model-fixup step --
+                        # this is the "still converts, then ask for a
+                        # library" behavior this tool is meant to have for
+                        # any symbol it can't fully resolve on its own.
+                        emit(
+                            f"  NOTE: found '{symbol_asy_file}' for symbol "
+                            f"'{comp.symbol}' but could not parse/convert it "
+                            f"({exc}) -- using a placeholder instead."
+                        )
+                        unusable_asy_files.add(comp.symbol)
+                        asy_reader = None
                     break
 
         if comp.rotation == 90:
@@ -5108,10 +5247,24 @@ def convert_asc_to_qsch(asc_file, qsch_file, search_paths=None, log=None):
         value = _resolve_component_display_value(comp)
 
         if asy_reader is not None:
-            symbol_tag = asy_reader.to_qsch(comp.reference, value)
-            comp.attributes["symbol"] = symbol_tag
-            converted += 1
-        else:
+            try:
+                symbol_tag = asy_reader.to_qsch(comp.reference, value)
+            except Exception as exc:
+                # Same fallback as a parse failure above -- a symbol that
+                # parsed fine but fails during geometry conversion (e.g. an
+                # unsupported drawing primitive) still shouldn't take the
+                # whole conversion down with it.
+                emit(
+                    f"  NOTE: found a symbol for '{comp.symbol}' but could "
+                    f"not convert it ({exc}) -- using a placeholder instead."
+                )
+                unusable_asy_files.add(comp.symbol)
+                asy_reader_cache.pop(comp.symbol, None)
+                asy_reader = None
+            else:
+                comp.attributes["symbol"] = symbol_tag
+                converted += 1
+        if asy_reader is None:
             symbol_key = (comp.symbol or "").strip().lower()
             builtin_items = builtin_symbol_templates.get(symbol_key)
             if builtin_items:
