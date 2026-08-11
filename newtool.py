@@ -5385,6 +5385,22 @@ def run_gui():
     root.title("QSpice Combined Tool: Convert + Fix")
     root.geometry("900x700")
 
+    def _do_quit():
+        # root.destroy() alone doesn't reliably end the process -- confirmed
+        # directly this session: closing the window left the compiled .exe
+        # still running as a background process (seen via tasklist showing
+        # two live newtool.exe instances at once), most likely a mainloop
+        # not fully unwinding under PyInstaller's windowed (console=False)
+        # bootloader. os._exit() guarantees the process actually ends.
+        try:
+            root.quit()
+            root.destroy()
+        except Exception:
+            pass
+        os._exit(0)
+
+    root.protocol("WM_DELETE_WINDOW", _do_quit)
+
     asc_var = tk.StringVar()
     qsch_var = tk.StringVar()
     use_default_output_var = tk.BooleanVar(value=True)
@@ -5407,7 +5423,7 @@ def run_gui():
     main = ttk.Frame(root, padding=12)
     main.pack(fill="both", expand=True)
     main.columnconfigure(0, weight=1)
-    main.rowconfigure(6, weight=1)
+    main.rowconfigure(3, weight=1)
 
     files = ttk.LabelFrame(main, text="Files", padding=10)
     files.grid(row=0, column=0, sticky="ew")
@@ -5468,57 +5484,10 @@ def run_gui():
         variable=use_default_output_var,
     ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(8, 0))
 
-    paths_frame = ttk.LabelFrame(
-        main, text="Extra .asy symbol search folders (for step 1)", padding=10
-    )
-    paths_frame.grid(row=1, column=0, sticky="ew", pady=(10, 0))
-    paths_frame.columnconfigure(0, weight=1)
-
-    list_frame = ttk.Frame(paths_frame)
-    list_frame.grid(row=0, column=0, sticky="nsew")
-    list_frame.columnconfigure(0, weight=1)
-
-    path_list = tk.Listbox(list_frame, height=4, selectmode=tk.EXTENDED)
-    path_list.grid(row=0, column=0, sticky="nsew")
-    path_scroll = ttk.Scrollbar(
-        list_frame, orient="vertical", command=path_list.yview
-    )
-    path_scroll.grid(row=0, column=1, sticky="ns")
-    path_list.configure(yscrollcommand=path_scroll.set)
-
-    custom_paths: List[str] = []
-
-    def refresh_path_list():
-        path_list.delete(0, tk.END)
-        for p in custom_paths:
-            path_list.insert(tk.END, p)
-
-    def add_path():
-        path = filedialog.askdirectory(
-            parent=root, title="Select symbol search folder"
-        )
-        if path:
-            custom_paths[:] = _normalize_paths(custom_paths + [path])
-            refresh_path_list()
-
-    def remove_selected_path():
-        selected = set(path_list.curselection())
-        custom_paths[:] = [
-            p for i, p in enumerate(custom_paths) if i not in selected
-        ]
-        refresh_path_list()
-
-    btns = ttk.Frame(paths_frame)
-    btns.grid(row=1, column=0, sticky="w", pady=(8, 0))
-    ttk.Button(btns, text="Add folder...", command=add_path).pack(side="left")
-    ttk.Button(
-        btns, text="Remove selected", command=remove_selected_path
-    ).pack(side="left", padx=(8, 0))
-
     fix_frame = ttk.LabelFrame(
         main, text="Model fix-up options (for step 2)", padding=10
     )
-    fix_frame.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+    fix_frame.grid(row=1, column=0, sticky="ew", pady=(10, 0))
     ttk.Checkbutton(
         fix_frame,
         text="Auto-search system folders (Downloads/Desktop/Documents/LTspice)",
@@ -5547,7 +5516,7 @@ def run_gui():
     ).grid(row=4, column=0, sticky="w")
 
     log_frame = ttk.LabelFrame(main, text="Log", padding=10)
-    log_frame.grid(row=6, column=0, sticky="nsew", pady=(10, 0))
+    log_frame.grid(row=3, column=0, sticky="nsew", pady=(10, 0))
     log_frame.columnconfigure(0, weight=1)
     log_frame.rowconfigure(0, weight=1)
 
@@ -5597,7 +5566,6 @@ def run_gui():
             convert_asc_to_qsch(
                 asc_file,
                 qsch_file,
-                search_paths=_normalize_paths(custom_paths),
                 log=log,
             )
         except Exception as exc:
@@ -5667,11 +5635,11 @@ def run_gui():
             )
 
     action_row = ttk.Frame(main)
-    action_row.grid(row=3, column=0, sticky="w", pady=(10, 0))
+    action_row.grid(row=2, column=0, sticky="w", pady=(10, 0))
     ttk.Button(action_row, text="Convert and generate", command=run_all).pack(
         side="left"
     )
-    ttk.Button(action_row, text="Quit", command=root.destroy).pack(
+    ttk.Button(action_row, text="Quit", command=_do_quit).pack(
         side="left", padx=(8, 0)
     )
 
