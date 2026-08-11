@@ -1227,7 +1227,16 @@ def replace_zero_ohm_resistors_with_wires(
             position = _attr(comp, "position", "pos", default=None)
             rot = _attr(comp, "rotation", "rot", default=0)
             rot_val = int(getattr(rot, "value", rot))
-            orientation = (rot_val // 45) % 8
+            # NOT "% 8": QSCH orientation codes are 0-15 (8-15 = mirrored
+            # variants of 0-7 -- see _rotate_local_offset), and rot_val is
+            # already in the matching 0-719 degree encoding (0-359 =
+            # normal, 360-719 = mirrored, confirmed via a real mirrored
+            # resistor: rot_val=360 // 45 = 8, the correct ground-truth
+            # QSCH orientation for that component). An earlier "% 8" here
+            # wrapped that 8 straight back down to 0, silently discarding
+            # the mirror and computing the wrong pin position for any
+            # mirrored zero-ohm resistor.
+            orientation = rot_val // 45
             px, py = _point_xy(position)
             p1 = qsch_editor._find_pin_position((px, py), orientation, pins[0])
             p2 = qsch_editor._find_pin_position((px, py), orientation, pins[1])
