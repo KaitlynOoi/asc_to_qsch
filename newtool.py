@@ -1327,6 +1327,262 @@ def ensure_inductor_damping(qsch_editor, log: Callable[[str], None] = print) -> 
     return fixed
 
 
+_STARTUP_RAMP_DURATION = "20u"
+"""LTspice's own fixed ramp window for the .tran "startup" modifier --
+not a guess: quoting LTspice's own documentation (LTwiki's ".TRAN
+Modifiers" page) verbatim: "Solve the initial operating point with
+independent voltage and current sources turned off. Then start the
+transient analysis and turn these sources on in the first 20 us of the
+simulation." QSpice has no equivalent modifier at all (confirmed via
+Qorvo's own forum -- see HANDOFF.md section 4.2) and silently ignores
+"startup" outright, so replicating this ramp is the only way to get the
+same starting behavior QSpice doesn't do on its own.
+"""
+
+_RAMP_RELOCATE_OFFSET = 1400.0
+_RAMP_STUB_LEN = 300
+
+
+def _build_ramp_scaler_symbol(
+    bref: str, expr: str, plus_local: Tuple[int, int], minus_local: Tuple[int, int]
+) -> "QschTag":
+    """Builds a behavioral-voltage-source ('B') component whose "+"/"-"
+    pins sit at the EXACT local coordinates given -- these must be the
+    original source's own real local pin positions, not assumed. An
+    earlier version of this hardcoded the standard V-source template's
+    own pin positions (local (0,-100)="+", (0,-600)="-"), which is what
+    most sources use -- but confirmed wrong on a real circuit for a
+    current source (I1), whose real local pins were (0,0)/(0,-500)
+    instead. Placing a component built with the WRONG hardcoded pins at
+    another component's old (position, orientation) then puts its pins
+    at the wrong absolute spot, silently disconnecting it from the
+    existing wiring it was supposed to inherit -- confirmed by a real
+    "no other connection" checker warning on exactly that pin. The
+    decorative artwork (lines/ellipse) stays a fixed placeholder shape
+    regardless -- only the pins need to be electrically exact.
+    """
+    sym_tag = QschTag("symbol", "B")
+    for raw_item in (
+        "«type: B»",
+        "«description: Arbitrary behavioral voltage source»",
+        "«shorted pins: false»",
+        "«line (-50,-225) (50,-225) 0 0 0x1000000 -1 -1»",
+        "«line (-50,-475) (50,-475) 0 0 0x1000000 -1 -1»",
+        "«line (0,-175) (0,-275) 0 0 0x1000000 -1 -1»",
+        "«line (0,-600) (0,-550) 0 0 0x1000000 -1 -1»",
+        "«line (0,-100) (0,-150) 0 0 0x1000000 -1 -1»",
+        "«ellipse (-200,-150) (200,-550) 0 0 0 0x1000000 0x1000000 -1 -1»",
+    ):
+        tag, _ = QschTag.parse(raw_item)
+        sym_tag.items.append(tag)
+    ref_txt, _ = QschTag.parse(
+        f'«text ({plus_local[0]+150},{plus_local[1]}) 1 7 0 0x1000000 -1 -1 "{bref}"»'
+    )
+    val_txt, _ = QschTag.parse(
+        f'«text ({minus_local[0]+150},{minus_local[1]}) 1 7 0 0x1000000 -1 -1 "{expr}"»'
+    )
+    plus_pin, _ = QschTag.parse(
+        f'«pin ({plus_local[0]},{plus_local[1]}) (0,0) 1 0 0 0x1000000 -1 "+"»'
+    )
+    minus_pin, _ = QschTag.parse(
+        f'«pin ({minus_local[0]},{minus_local[1]}) (0,0) 1 0 0 0x1000000 -1 "-"»'
+    )
+    sym_tag.items.append(ref_txt)
+    sym_tag.items.append(val_txt)
+    sym_tag.items.append(plus_pin)
+    sym_tag.items.append(minus_pin)
+    return sym_tag
+
+
+def convert_startup_to_uic_with_source_ramp(
+    qsch_editor, log: Callable[[str], None] = print
+) -> int:
+    """Replaces ".tran ... startup" with ".tran ... uic", and ramps every
+    independent voltage/current source -- of ANY waveform type (constant,
+    PULSE, SINE, EXP, SFFM, PWL, ...) -- from 0 to its normal output over
+    the same 20us window LTspice's own "startup" modifier uses (see
+    _STARTUP_RAMP_DURATION).
+
+    This exists because QSpice silently ignores "startup" outright
+    (confirmed via Qorvo's own forum -- HANDOFF.md section 4.2): left
+    alone, QSpice instead falls back to a normal bias-point-solved start,
+    which is not guaranteed to land anywhere near what LTspice's real
+    "sources off, then ramp over 20us" behavior would have produced.
+    Switching to "uic" without ALSO ramping the sources was tested and
+    confirmed to make a real circuit's result WORSE (it skips the bias
+    solve and starts every other un-.ic'd state at zero, losing an entire
+    startup transient) -- so this function always does both together,
+    never "uic" alone.
+
+    HOW THE RAMP WORKS FOR ANY SOURCE TYPE, without reimplementing each
+    SPICE waveform's own formula (PULSE/SINE/EXP/SFFM math): the source
+    component is physically relocated to a fresh, otherwise-unused spot
+    with two brand new, uniquely-named net labels at its (moved) pins.
+    A new small behavioral ('B') source is then placed at the ORIGINAL
+    component's old (position, orientation) -- the exact spot the rest
+    of the circuit is already wired to -- computing
+    "V=(new_net_plus - new_net_minus) * min(1, time/20u)". Since an
+    ideal source's own two-terminal voltage/current IS its intended
+    waveform value at that instant regardless of function type, scaling
+    that by a 0->1 ramp reproduces LTspice's "turn these sources on in
+    the first 20us" for any source shape, with zero waveform-formula
+    reimplementation. The rest of the circuit's wiring is completely
+    untouched -- only the original source itself moves.
+
+    Opt-in (off by default): whether this is actually an improvement is
+    circuit-dependent -- it was NOT better than doing nothing for at
+    least one real circuit whose default bias-point solve already landed
+    close to LTspice's real result.
+    """
+    tran_fixed = 0
+    for text_tag in qsch_editor.schematic.get_items("text"):
+        try:
+            raw = text_tag.get_attr(QSCH_TEXT_STR_ATTR)
+        except Exception:
+            continue
+        if not isinstance(raw, str) or not raw.startswith(QSCH_TEXT_INSTR_QUALIFIER):
+            continue
+        content = raw[len(QSCH_TEXT_INSTR_QUALIFIER):]
+        lines = content.replace("\\n", "\n").split("\n")
+        changed = False
+        new_lines = []
+        for line in lines:
+            stripped = line.strip()
+            if stripped.upper().startswith(".TRAN"):
+                tokens = stripped.split()
+                tokens = [t for t in tokens if t.upper() != "STARTUP"]
+                if not any(t.upper() == "UIC" for t in tokens):
+                    tokens.append("uic")
+                new_line = " ".join(tokens)
+                if new_line != stripped:
+                    changed = True
+                new_lines.append(new_line)
+            else:
+                new_lines.append(line)
+        if changed:
+            new_content = "\\n".join(new_lines) if "\\n" in content else "\n".join(new_lines)
+            try:
+                text_tag.set_attr(QSCH_TEXT_STR_ATTR, QSCH_TEXT_INSTR_QUALIFIER + new_content)
+                tran_fixed += 1
+                log('  Rewrote ".tran ... startup" to use "uic" instead (QSpice ignores "startup" entirely).')
+            except Exception as e:
+                log(f"  WARNING: could not rewrite .tran directive: {e}")
+
+    ramped = 0
+    if tran_fixed:
+        # Relocating each source by a small FIXED offset from its own old
+        # position was tried first and confirmed unsafe on a real circuit:
+        # even after checking that the new pin positions didn't land on an
+        # EXISTING wire's exact endpoint, the new stub wire's own PATH still
+        # ran straight through the middle of a long, pre-existing vertical
+        # power-rail wire it never touched at an endpoint -- producing a
+        # real "conflicting_net_labels" checker error. Endpoint-only
+        # collision checking can't catch a wire crossing through the
+        # interior of another wire's run. The robust fix (same reasoning
+        # _compute_schematic_bounds's own docstring already documents for
+        # gate placement) is to not gamble on any position near the
+        # existing circuit at all: stage every relocated source in a single
+        # column entirely outside the schematic's current bounding box,
+        # where nothing else has ever been drawn, spaced out enough from
+        # each other that they can't collide with each other either.
+        min_x, min_y, max_x, _max_y = _compute_schematic_bounds(qsch_editor)
+        stage_x = min_x - _RAMP_RELOCATE_OFFSET
+        # Spaced well beyond a standard V/I source's own body span (~600
+        # units between its two pins) plus the stub wires added on each
+        # side, so adjacently-staged sources can't overlap each other.
+        stage_row_height = 1600.0
+        stage_index = [0]
+
+        def _relocate_target(
+            px: float, py: float, orientation: int, pin_local: Dict[str, Tuple[int, int]]
+        ) -> Tuple[int, int]:
+            row = stage_index[0]
+            stage_index[0] += 1
+            return (int(round(stage_x)), int(round(min_y + row * stage_row_height)))
+
+        components = list(getattr(qsch_editor, "components", {}).items())
+        for refdes, comp in components:
+            ref = str(_attr(comp, "reference", "refdes", "InstName", default=refdes)).strip()
+            comp_type = str(_attr(comp, "type", "Type", "symbol_type", default="")).strip().upper()
+            if comp_type not in ("V", "I"):
+                continue
+            component_tag = _attr(comp, "tag", default=None)
+            if component_tag is None:
+                continue
+            try:
+                symbol_items = component_tag.get_items("symbol")
+                symbol_tag = symbol_items[0] if symbol_items else None
+                pins = list(symbol_tag.get_items("pin")) if symbol_tag is not None else []
+                old_pos = component_tag.get_attr(1)
+                orientation = int(component_tag.get_attr(2))
+            except Exception:
+                continue
+            if len(pins) != 2 or old_pos is None:
+                continue
+
+            pin_local: Dict[str, Tuple[int, int]] = {}
+            try:
+                for pin in pins:
+                    pin_local[str(pin.get_attr(8))] = tuple(pin.get_attr(1))
+            except Exception:
+                continue
+            if "+" not in pin_local or "-" not in pin_local:
+                continue
+
+            new_pos = _relocate_target(old_pos[0], old_pos[1], orientation, pin_local)
+            try:
+                component_tag.set_attr(1, new_pos)
+                # Reset to upright: the staged position is arbitrary anyway
+                # (nothing else is nearby to align with), and orientation 0
+                # means the relocated pins land at exactly new_pos+local_xy
+                # with no rotation math needed at all.
+                component_tag.set_attr(2, 0)
+            except Exception as e:
+                log(f"  WARNING: could not relocate source {ref}: {e}")
+                continue
+
+            plus_net = f"{ref}_RampRef_P"
+            minus_net = f"{ref}_RampRef_N"
+            try:
+                for pin_name, net_name in (("+", plus_net), ("-", minus_net)):
+                    local_xy = pin_local[pin_name]
+                    pin_abs = (new_pos[0] + local_xy[0], new_pos[1] + local_xy[1])
+                    stub_abs = _cosmetic_stub_endpoint(
+                        (pin_abs[0] - new_pos[0], pin_abs[1] - new_pos[1]), _RAMP_STUB_LEN
+                    )
+                    stub_abs = (new_pos[0] + stub_abs[0], new_pos[1] + stub_abs[1])
+                    wire_tag, _ = QschTag.parse(
+                        f'«wire ({pin_abs[0]},{pin_abs[1]}) ({stub_abs[0]},{stub_abs[1]}) "{net_name}"»'
+                    )
+                    net_tag, _ = QschTag.parse(
+                        f'«net ({stub_abs[0]},{stub_abs[1]}) 1 13 0 "{net_name}"»'
+                    )
+                    qsch_editor.schematic.items.append(wire_tag)
+                    qsch_editor.schematic.items.append(net_tag)
+            except Exception as e:
+                log(f"  WARNING: could not label relocated source {ref}'s pins: {e}")
+                continue
+
+            expr = f"V=({plus_net}-{minus_net})*min(1,time/{_STARTUP_RAMP_DURATION})"
+            new_comp_tag = QschTag()
+            new_comp_tag.tokens = ["component", f"({old_pos[0]},{old_pos[1]})", str(orientation), "0"]
+            new_comp_tag.items.append(
+                _build_ramp_scaler_symbol(f"{ref}_Ramp", expr, pin_local["+"], pin_local["-"])
+            )
+            qsch_editor.schematic.items.append(new_comp_tag)
+
+            ramped += 1
+            log(
+                f"  Ramped source {ref} from 0 over {_STARTUP_RAMP_DURATION} "
+                "(relocated original + added a behavioral scaler at its old position, "
+                "so any waveform shape -- not just a constant -- gets ramped)."
+            )
+
+    if tran_fixed or ramped:
+        qsch_editor.canvas_updated = True
+    return ramped
+
+
 @dataclass
 class ProcessingResult:
     fixed_count: int
@@ -1341,6 +1597,7 @@ class ProcessingResult:
     qspice_local_library_count: int = 0
     digital_primitives_synthesized: int = 0
     cancelled: bool = False
+    sources_ramped_count: int = 0
 
 
 def fix_misclassified_comments(
@@ -3386,6 +3643,7 @@ def process_models(
     log: Callable[[str], None] = print,
     fix_annotations: bool = True,
     replace_zero_ohm: bool = True,
+    apply_startup_ramp_workaround: bool = False,
     choose_device_model: Optional[
         Callable[[str, List[str], List[tuple]], Optional[dict]]
     ] = None,
@@ -3689,6 +3947,18 @@ def process_models(
     if inductors_damped_count == 0:
         log("  None needed damping adjustments.")
 
+    sources_ramped_count = 0
+    if apply_startup_ramp_workaround:
+        log("")
+        log("Replacing '.tran ... startup' (ignored by QSpice) with 'uic' + source ramps...")
+        try:
+            sources_ramped_count = convert_startup_to_uic_with_source_ramp(qsch_editor, log=log)
+        except Exception as e:
+            log(f"  WARNING: startup-ramp workaround failed: {e}")
+            sources_ramped_count = 0
+        if sources_ramped_count == 0:
+            log("  Nothing to do -- no '.tran ... startup' directive found.")
+
     log("")
     log("Normalizing .lib/.include instructions...")
     normalized_count = _normalize_lib_tags(qsch_editor, log=log)
@@ -3705,7 +3975,8 @@ def process_models(
         f"{digital_primitives_synthesized} LTspice digital primitive(s) synthesized as QSpice-compatible behavioral sources, "
         f"{reclassified_count} annotation(s) reclassified as comments, "
         f"{replaced_zero_ohm_count} zero-ohm resistor(s) replaced with wires, "
-        f"{inductors_damped_count} inductor(s) auto-damped "
+        f"{inductors_damped_count} inductor(s) auto-damped, "
+        f"{sources_ramped_count} source(s) startup-ramped "
         f"in {qsch_file}"
     )
     skipped = sorted(set(skipped_libs))
@@ -3727,6 +3998,7 @@ def process_models(
         inductors_damped_count=inductors_damped_count,
         qspice_local_library_count=qspice_local_count,
         digital_primitives_synthesized=digital_primitives_synthesized,
+        sources_ramped_count=sources_ramped_count,
     )
 
 
@@ -5120,6 +5392,7 @@ def run_gui():
     fix_annotations_var = tk.BooleanVar(value=True)
     replace_zero_ohm_var = tk.BooleanVar(value=True)
     device_model_fix_var = tk.BooleanVar(value=True)
+    startup_ramp_var = tk.BooleanVar(value=False)
 
     def _on_qsch_manual_edit(*_args):
         if asc_var.get():
@@ -5266,6 +5539,12 @@ def run_gui():
         text="Detect & prompt for missing component model/subcircuit definitions (recommended)",
         variable=device_model_fix_var,
     ).grid(row=3, column=0, sticky="w")
+    ttk.Checkbutton(
+        fix_frame,
+        text="Replace '.tran ... startup' (QSpice ignores it) with 'uic' + ramp every source"
+        " -- only helps if the default result doesn't already match LTspice well",
+        variable=startup_ramp_var,
+    ).grid(row=4, column=0, sticky="w")
 
     log_frame = ttk.LabelFrame(main, text="Log", padding=10)
     log_frame.grid(row=6, column=0, sticky="nsew", pady=(10, 0))
@@ -5356,6 +5635,7 @@ def run_gui():
                 log=log,
                 fix_annotations=fix_annotations_var.get(),
                 replace_zero_ohm=replace_zero_ohm_var.get(),
+                apply_startup_ramp_workaround=startup_ramp_var.get(),
                 choose_device_model=(
                     device_chooser if device_model_fix_var.get() else None
                 ),
@@ -5421,6 +5701,14 @@ def run_cli_combined(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--no-annotation-fix", action="store_true")
     parser.add_argument("--no-zero-ohm-replacement", action="store_true")
     parser.add_argument("--no-device-model-fix", action="store_true")
+    parser.add_argument(
+        "--apply-startup-ramp-workaround",
+        action="store_true",
+        help="Replace '.tran ... startup' (silently ignored by QSpice) with 'uic' plus a "
+        "0-to-value ramp on every independent source, matching LTspice's startup behavior "
+        "more closely. Off by default -- circuit-dependent whether it's actually an "
+        "improvement over doing nothing (see HANDOFF.md section 6.6).",
+    )
     args = parser.parse_args(argv)
 
     asc_file = os.path.normpath(args.asc_file)
@@ -5452,6 +5740,7 @@ def run_cli_combined(argv: Optional[List[str]] = None) -> int:
         log=print,
         fix_annotations=not args.no_annotation_fix,
         replace_zero_ohm=not args.no_zero_ohm_replacement,
+        apply_startup_ramp_workaround=args.apply_startup_ramp_workaround,
         choose_device_model=device_chooser,
         review_choices=review_choices_cli,
         confirm_before_generating=confirm_and_generate_cli,
