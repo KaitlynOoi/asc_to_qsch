@@ -3548,7 +3548,17 @@ def process_models(
     log("=" * 60)
     log("COMPONENTS NEEDING VALUE FIX + MODEL IMPORT")
     log("=" * 60)
-    for model, refs in missing_by_model.items():
+    # Full upfront total -- every model and component listed here, before
+    # any of them are individually asked about below -- so the user knows
+    # the complete scope of what's about to be asked, not just one model
+    # at a time as it comes up.
+    total_components = sum(len(refs) for refs in missing_by_model.values())
+    if missing_by_model:
+        log(
+            f"Total: {total_components} component(s) across "
+            f"{len(missing_by_model)} model(s) will need a library import:"
+        )
+    for model, refs in sorted(missing_by_model.items()):
         log(f"  {model}  ({len(refs)} component(s): {', '.join(sorted(refs))})")
     log("")
     resolved_paths: Dict[str, str] = {}
@@ -3618,6 +3628,14 @@ def process_models(
     if not unresolved_device_models:
         log("  None found -- every component model is already satisfied.")
     else:
+        total_device_components = sum(
+            len(refs) for refs in unresolved_device_models.values()
+        )
+        log(
+            f"Total: {total_device_components} component(s) across "
+            f"{len(unresolved_device_models)} model(s) will need a "
+            f"definition, before any of them are asked about individually:"
+        )
         for model in sorted(unresolved_device_models.keys()):
             refs = unresolved_device_models[model]
             ref_desc = ", ".join(f"{r} ({t})" for r, t in refs)
