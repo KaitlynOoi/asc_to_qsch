@@ -4110,11 +4110,25 @@ def confirm_and_generate_cli(resolved_paths: dict, device_choices: dict) -> bool
             print("  Device models:")
             for model, choice in sorted(device_choices.items()):
                 print(f"    {model} -> {_describe_cli_choice(choice)}")
-    answer = (
-        input("Generate the final QSpice schematic with these choices? [Y/n]: ")
-        .strip()
-        .lower()
-    )
+    try:
+        answer = (
+            input("Generate the final QSpice schematic with these choices? [Y/n]: ")
+            .strip()
+            .lower()
+        )
+    except Exception:
+        # No real console attached to ask from (e.g. launched via a file
+        # association) -- the whole point of this step is to let the user
+        # back out if something looks wrong in the review above, so the
+        # safe default when it genuinely can't be asked is "don't
+        # generate," not "assume yes." Silently defaulting to yes here
+        # would just be an unconfirmed auto-generate wearing a
+        # confirmation dialog's clothes.
+        print(
+            "  NOTE: no console available to confirm -- treating as declined. "
+            "Nothing was written."
+        )
+        return False
     return answer in ("", "y", "yes")
 
 
