@@ -5587,6 +5587,18 @@ def run_gui():
             messagebox.showinfo(
                 "Done", f"Finished!\nSaved to:\n{qsch_file}", parent=root
             )
+            if messagebox.askyesno(
+                "View file?",
+                f"Open the converted file now?\n\n{qsch_file}",
+                parent=root,
+            ):
+                try:
+                    os.startfile(qsch_file)
+                except Exception as exc:
+                    log(f"  NOTE: could not open {qsch_file} automatically: {exc}")
+                    messagebox.showerror(
+                        "Could not open file", str(exc), parent=root
+                    )
 
     action_row = ttk.Frame(main)
     action_row.grid(row=2, column=0, sticky="w", pady=(10, 0))
@@ -5653,7 +5665,7 @@ def run_cli_combined(argv: Optional[List[str]] = None) -> int:
         None if args.no_device_model_fix else choose_device_model_cli
     )
 
-    process_models(
+    result = process_models(
         asc_file=asc_file,
         qsch_file=qsch_file,
         search_roots=search_roots,
@@ -5666,6 +5678,31 @@ def run_cli_combined(argv: Optional[List[str]] = None) -> int:
         review_choices=review_choices_cli,
         confirm_before_generating=confirm_and_generate_cli,
     )
+
+    if not result.cancelled:
+        # This exe is built windowed (console=False, see newtool.spec) so
+        # the GUI never shows a black terminal window -- but that also
+        # means a CLI-mode run launched without an attached console (e.g.
+        # from a shortcut) has no real stdin at all. input() then fails
+        # immediately instead of waiting for a keypress, which previously
+        # crashed the whole run right at the finish line. Exactly which
+        # exception that failure surfaces as isn't consistent across every
+        # "no real console" situation (confirmed EOFError in the one real
+        # crash report; a broader catch here covers e.g. AttributeError if
+        # sys.stdin itself ends up None rather than a closed/empty stream).
+        # Guarded broadly so "no console available," in any form, just
+        # silently skips the prompt instead of crashing -- the file is
+        # already saved either way, this step is purely a convenience.
+        try:
+            answer = input("\nOpen the converted file now? [y/N]: ").strip().lower()
+        except Exception:
+            answer = ""
+        if answer == "y":
+            try:
+                os.startfile(qsch_file)
+            except Exception as exc:
+                print(f"  NOTE: could not open {qsch_file} automatically: {exc}")
+
     return 0
 
 
