@@ -5496,10 +5496,29 @@ def run_gui():
     log_scroll.grid(row=0, column=1, sticky="ns")
     log_text.configure(yscrollcommand=log_scroll.set)
 
+    log_lines: List[str] = []
+
     def log(msg=""):
-        log_text.insert(tk.END, str(msg) + "\n")
+        text = str(msg)
+        log_text.insert(tk.END, text + "\n")
         log_text.see(tk.END)
         root.update_idletasks()
+        log_lines.append(text)
+
+    def write_log_file(qsch_file: str):
+        # Same location and name as the converted .qsch, just a .log
+        # extension -- matches the convention LTspice/QSpice's own .log
+        # files already use next to a schematic. Written unconditionally
+        # at the end of a run (success, cancelled, or errored) via the
+        # caller's try/finally, so a failed run's log is captured too.
+        if not log_lines:
+            return
+        log_path = os.path.splitext(qsch_file)[0] + ".log"
+        try:
+            with open(log_path, "w", encoding="utf-8") as f:
+                f.write("\n".join(log_lines) + "\n")
+        except Exception as exc:
+            log(f"  NOTE: could not write log file {log_path}: {exc}")
 
     def run_all():
         asc_file = os.path.normpath(asc_var.get().strip())
@@ -5526,6 +5545,7 @@ def run_gui():
                 return
 
         log_text.delete("1.0", tk.END)
+        log_lines.clear()
         log("=" * 60)
         log("Converting .asc -> .qsch")
         log("=" * 60)
@@ -5539,6 +5559,7 @@ def run_gui():
         except Exception as exc:
             log(f"ERROR during conversion: {exc}")
             messagebox.showerror("Conversion failed", str(exc), parent=root)
+            write_log_file(qsch_file)
             return
 
         log("")
@@ -5581,6 +5602,7 @@ def run_gui():
         except Exception as exc:
             log(f"ERROR during model fix-up: {exc}")
             messagebox.showerror("Model fix-up failed", str(exc), parent=root)
+            write_log_file(qsch_file)
             return
 
         log("")
@@ -5614,6 +5636,8 @@ def run_gui():
                         "Could not open file", str(exc), parent=root
                     )
 
+        write_log_file(qsch_file)
+
     action_row = ttk.Frame(main)
     action_row.grid(row=2, column=0, sticky="w", pady=(10, 0))
     ttk.Button(action_row, text="Convert and generate", command=run_all).pack(
@@ -5624,6 +5648,31 @@ def run_gui():
     )
 
     root.mainloop()
+
+
+class _TeeStdout:
+    """Duplicates every write to the real stdout into an in-memory buffer,
+    so run_cli_combined can export a full transcript (everything printed --
+    phase headers, per-component resolution log, prompts, chosen answers)
+    to a .log file alongside the converted .qsch, matching what the GUI's
+    own log_text/write_log_file already capture. Wrapping sys.stdout
+    itself (rather than threading a custom logger through every print()
+    and input() call site in this file) keeps this additive: no existing
+    call site needed to change."""
+
+    def __init__(self, original):
+        self._original = original
+        self.text = ""
+
+    def write(self, s):
+        self._original.write(s)
+        self.text += s
+
+    def flush(self):
+        self._original.flush()
+
+    def isatty(self):
+        return getattr(self._original, "isatty", lambda: False)()
 
 
 def run_cli_combined(argv: Optional[List[str]] = None) -> int:
@@ -5663,6 +5712,28 @@ def run_cli_combined(argv: Optional[List[str]] = None) -> int:
         args.qsch_file or (os.path.splitext(asc_file)[0] + ".qsch")
     )
 
+    tee = _TeeStdout(sys.stdout)
+    sys.stdout = tee
+    try:
+        return _run_cli_combined_body(asc_file, qsch_file, args)
+    finally:
+        sys.stdout = tee._original
+        # Same location and name as the converted .qsch, just a .log
+        # extension -- matches the convention LTspice/QSpice's own .log
+        # files already use next to a schematic. Written unconditionally
+        # here (success, cancelled, or errored -- an uncaught exception
+        # still runs this finally block before propagating) so a failed
+        # run's transcript is captured too.
+        if tee.text:
+            log_path = os.path.splitext(qsch_file)[0] + ".log"
+            try:
+                with open(log_path, "w", encoding="utf-8") as f:
+                    f.write(tee.text)
+            except Exception as exc:
+                print(f"  NOTE: could not write log file {log_path}: {exc}")
+
+
+def _run_cli_combined_body(asc_file: str, qsch_file: str, args) -> int:
     print(f"Converting {asc_file} -> {qsch_file}")
     convert_asc_to_qsch(
         asc_file,
