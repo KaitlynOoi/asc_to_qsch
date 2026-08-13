@@ -1435,7 +1435,7 @@ def convert_startup_to_uic(qsch_editor, log: Callable[[str], None] = print) -> i
     swap, nothing else. No components are moved, added, or rewired.
 
     This exists because QSpice silently ignores "startup" outright
-    (confirmed via Qorvo's own forum -- HANDOFF.md section 4.2): left
+    (confirmed via Qorvo's own forum -- README.md section 4.2): left
     alone, QSpice falls back to a normal bias-point-solved start instead.
 
     An earlier version of this also tried to replicate LTspice's actual
@@ -1446,7 +1446,7 @@ def convert_startup_to_uic(qsch_editor, log: Callable[[str], None] = print) -> i
     without visibly changing the simulated result -- not worth the
     schematic clutter for a benefit that didn't show up in practice. If
     revisiting this, the ramp mechanism and the two real bugs found
-    while building it are preserved in git history and in HANDOFF.md
+    while building it are preserved in git history and in README.md
     section 6.6 for reference.
     """
     tran_fixed = 0
@@ -5912,7 +5912,7 @@ def run_cli_combined(argv: Optional[List[str]] = None) -> int:
         action="store_true",
         help="Replace '.tran ... startup' (silently ignored by QSpice) with 'uic'. Off by "
         "default -- circuit-dependent whether it's actually an improvement over doing "
-        "nothing (see HANDOFF.md section 6.6).",
+        "nothing (see README.md section 6.6).",
     )
     args = parser.parse_args(argv)
 

@@ -300,7 +300,7 @@ ver2/                          # what gets shared/uploaded as a whole
 └── source/                    # code + resources + the git repo itself
     ├── conversion_tool.py              # the entire tool -- single file, ~5400 lines
     ├── conversion_tool.spec             # PyInstaller build spec
-    ├── HANDOFF.md                # this document
+    ├── README.md                # this document
     ├── .git/                     # repo root -- run git commands from here
     ├── .gitignore
     ├── reference/
