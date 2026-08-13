@@ -3542,6 +3542,45 @@ def process_models(
             continue
         missing_by_model[bare].append(ref)
 
+    # Quick, approximate combined preview across BOTH categories (library
+    # imports below, plus device models further down) -- shown before
+    # either one is individually asked about. The device-model half can't
+    # be made fully accurate this early: it needs digital-gate synthesis
+    # to have already run (further down) to exclude gates that get
+    # resolved without ever needing an external model, so an LTspice gate
+    # scanned here would count as "needs a model" and then not actually
+    # get asked about later. Labeled approximate rather than presented as
+    # exact for that reason; the real, exact count for each category is
+    # still shown right before that category is asked about, unchanged.
+    approx_device_count = 0
+    try:
+        _preview_editor = QschEditor(qsch_file)
+        _preview_existing = _existing_model_definitions(_preview_editor)
+        _preview_refs = parse_qsch_primitive_device_refs(
+            _preview_editor, log=lambda *_a, **_k: None
+        )
+        approx_device_count = sum(
+            len(refs)
+            for name, refs in _preview_refs.items()
+            if name not in _preview_existing
+            and name not in missing_by_model
+            and not is_qspice_local_library_component(name)
+        )
+    except Exception:
+        pass
+
+    lib_total = sum(len(refs) for refs in missing_by_model.values())
+    grand_total = lib_total + approx_device_count
+    if grand_total:
+        log("=" * 60)
+        log(
+            f"~{grand_total} component(s) total will need something imported "
+            f"or defined before this circuit is fully resolved: "
+            f"{lib_total} confirmed library import(s) + ~{approx_device_count} "
+            f"device model(s) (approximate -- confirmed exact count follows "
+            f"further below, after digital-gate synthesis has run)."
+        )
+
     if not missing_by_model:
         log("No unresolved subcircuit components found via ASC map.")
 
