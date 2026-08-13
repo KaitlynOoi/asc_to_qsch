@@ -291,26 +291,40 @@ Confirmed via direct testing: switching to `.tran ... uic` **on its own** (witho
 
 ## 7. Repository layout
 
+Restructured for distribution (e.g. dropping the whole `ver2/` folder onto a company portal/share): the deliverable exe sits alone at the top level where it's immediately obvious, and everything else — source, docs, the vendored library — lives together under `source/`, which is also the actual git repository root (`source/.git`).
+
 ```
-ver2/
-├── newtool.py              # the entire tool -- single file, ~5400 lines
-├── newtool.spec             # PyInstaller build spec
-├── HANDOFF.md                # this document
-├── reference/
-│   └── qspice_gate_library.qsch   # QSpice's own native gate shapes, used for
-│                                     visual matching during gate synthesis
-├── spicelib_vendor/          # vendored copy of spicelib 1.5.1 (GPL-3.0)
-│   ├── VENDORED.md           # provenance notes -- why/how this was vendored
-│   ├── LICENSE
-│   └── editor/, sim/, raw/, scripts/, simulators/, log/, client_server/, utils/
-└── dist/
-    └── newtool.exe          # the built deliverable (not committed to git --
-                                see .gitignore; rebuild via
-                                `pyinstaller newtool.spec`)
+ver2/                          # what gets shared/uploaded as a whole
+├── newtool.exe                # <-- the deliverable. Run this. Nothing else
+│                                   needed at this level.
+└── source/                    # code + resources + the git repo itself
+    ├── newtool.py              # the entire tool -- single file, ~5400 lines
+    ├── newtool.spec             # PyInstaller build spec
+    ├── HANDOFF.md                # this document
+    ├── .git/                     # repo root -- run git commands from here
+    ├── .gitignore
+    ├── reference/
+    │   └── qspice_gate_library.qsch   # QSpice's own native gate shapes, used for
+    │                                     visual matching during gate synthesis
+    ├── spicelib_vendor/          # vendored copy of spicelib 1.5.1 (GPL-3.0)
+    │   ├── VENDORED.md           # provenance notes -- why/how this was vendored
+    │   ├── LICENSE
+    │   └── editor/, sim/, raw/, scripts/, simulators/, log/, client_server/, utils/
+    └── dist/
+        └── newtool.exe          # PyInstaller's own build output (not committed
+                                     to git -- see .gitignore); copy this up to
+                                     ver2/newtool.exe to update the shared copy
 ```
 
-To rebuild the exe after any source change:
+To rebuild the exe after any source change (run from `source/`):
 ```bash
 python -m PyInstaller newtool.spec --noconfirm
 ```
 (Close any running `newtool.exe` first — PyInstaller can't overwrite a locked file.)
+
+Then copy the freshly built exe up to the top-level shared location:
+```bash
+cp dist/newtool.exe ../newtool.exe
+```
+
+`build/` (PyInstaller's intermediate cache, also gitignored) has intermittently been left behind directly under `ver2/` in this environment rather than `source/build/`, when a locked-file issue prevented moving it during this restructuring — see section 6, item 8. Harmless either way; delete it manually if it's ever in the way, it regenerates on the next build.
