@@ -291,10 +291,10 @@ Confirmed via direct testing: switching to `.tran ... uic` **on its own** (witho
 
 ## 7. Repository layout
 
-Restructured for distribution (e.g. dropping the whole `ver2/` folder onto a company portal/share): the deliverable exe sits alone at the top level where it's immediately obvious, and everything else — source, docs, the vendored library — lives together under `source/`, which is also the actual git repository root (`source/.git`).
+Restructured for distribution (e.g. dropping the whole `qspice/` folder onto a company portal/share): the deliverable exe sits alone at the top level where it's immediately obvious, and everything else — source, docs, the vendored library — lives together under `source/`, which is also the actual git repository root (`source/.git`).
 
 ```
-ver2/                          # what gets shared/uploaded as a whole
+qspice/                          # what gets shared/uploaded as a whole
 ├── conversion_tool.exe                # <-- the deliverable. Run this. Nothing else
 │                                   needed at this level.
 └── source/                    # code + resources + the git repo itself
@@ -313,7 +313,7 @@ ver2/                          # what gets shared/uploaded as a whole
     └── dist/
         └── conversion_tool.exe          # PyInstaller's own build output (not committed
                                      to git -- see .gitignore); copy this up to
-                                     ver2/conversion_tool.exe to update the shared copy
+                                     qspice/conversion_tool.exe to update the shared copy
 ```
 
 To rebuild the exe after any source change (run from `source/`):
@@ -327,4 +327,4 @@ Then copy the freshly built exe up to the top-level shared location:
 cp dist/conversion_tool.exe ../conversion_tool.exe
 ```
 
-`build/` (PyInstaller's intermediate cache, also gitignored) has intermittently been left behind directly under `ver2/` in this environment rather than `source/build/`, when a locked-file issue prevented moving it during this restructuring — see section 6, item 8. Harmless either way; delete it manually if it's ever in the way, it regenerates on the next build.
+`build/` (PyInstaller's intermediate cache, also gitignored) has intermittently been left behind directly under `qspice/` in this environment rather than `source/build/`, when a locked-file issue prevented moving it during this restructuring — see section 6, item 8. Harmless either way; delete it manually if it's ever in the way, it regenerates on the next build.
