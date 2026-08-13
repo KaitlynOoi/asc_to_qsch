@@ -5561,7 +5561,7 @@ def run_gui():
         # root.destroy() alone doesn't reliably end the process -- confirmed
         # directly this session: closing the window left the compiled .exe
         # still running as a background process (seen via tasklist showing
-        # two live newtool.exe instances at once), most likely a mainloop
+        # two live conversion_tool.exe instances at once), most likely a mainloop
         # not fully unwinding under PyInstaller's windowed (console=False)
         # bootloader. os._exit() guarantees the process actually ends.
         try:
@@ -5974,7 +5974,7 @@ def _run_cli_combined_body(asc_file: str, qsch_file: str, args) -> int:
     )
 
     if not result.cancelled:
-        # This exe is built windowed (console=False, see newtool.spec) so
+        # This exe is built windowed (console=False, see conversion_tool.spec) so
         # the GUI never shows a black terminal window -- but that also
         # means a CLI-mode run launched without an attached console (e.g.
         # from a shortcut) has no real stdin at all. input() then fails
