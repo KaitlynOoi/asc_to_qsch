@@ -1,0 +1,15 @@
+{
+    "files.exclude": {
+        "**/__pycache__": true,
+        "**/*.pyc": true,
+        "build/": true
+    },
+    "search.exclude": {
+        "**/__pycache__": true,
+        "build/": true
+    },
+    "python.analysis.exclude": [
+        "**/__pycache__",
+        "build"
+    ]
+}
