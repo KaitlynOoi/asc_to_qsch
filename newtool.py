@@ -3490,6 +3490,7 @@ def process_models(
         Callable[[str, Dict[str, list], dict, Callable[[str], Any]], dict]
     ] = None,
     confirm_before_generating: Optional[Callable[[dict, dict], bool]] = None,
+    preview_callback: Optional[Callable[[str], None]] = None,
 ) -> ProcessingResult:
     """review_choices and confirm_before_generating are both optional and
     default to None, which reproduces this function's original behavior
@@ -3513,6 +3514,14 @@ def process_models(
     (the automatic fixups below -- annotation cleanup, zero-ohm
     replacement, inductor damping -- and the final save still happen, same
     as if every remaining choice had been individually skipped).
+
+    preview_callback(text) is called once, before either category is
+    individually asked about, with the same combined upfront
+    list/total that's already written to `log` line-by-line -- as one
+    block of text, so a caller can also show it somewhere more
+    prominent (e.g. a GUI popup) than a scrolling log. Optional; not
+    calling it (e.g. from the CLI, where the terminal output already
+    serves that purpose) changes nothing else.
     """
     _patch_spicelib_qsch_colon_parsing(log=log)
     _clear_model_candidate_cache()
@@ -3573,29 +3582,40 @@ def process_models(
     lib_total = sum(len(refs) for refs in missing_by_model.values())
     grand_total = lib_total + approx_device_count
     if grand_total:
-        log("=" * 60)
-        log("FULL LIST OF COMPONENTS THAT WILL NEED SOMETHING IMPORTED OR DEFINED")
-        log("=" * 60)
-        log(
+        preview_lines = [
             f"~{grand_total} component(s) total, before any of them are "
             f"individually asked about below: {lib_total} confirmed library "
             f"import(s) + ~{approx_device_count} device model(s) (approximate "
             f"-- confirmed exact list follows further below, after "
-            f"digital-gate synthesis has run)."
-        )
+            f"digital-gate synthesis has run).",
+        ]
         if missing_by_model:
-            log("")
-            log("Library imports (confirmed):")
+            preview_lines.append("")
+            preview_lines.append("Library imports (confirmed):")
             for model, refs in sorted(missing_by_model.items()):
-                log(f"  {model}  ({len(refs)} component(s): {', '.join(sorted(refs))})")
+                preview_lines.append(
+                    f"  {model}  ({len(refs)} component(s): {', '.join(sorted(refs))})"
+                )
         if approx_device_models:
-            log("")
-            log("Device models (approximate):")
+            preview_lines.append("")
+            preview_lines.append("Device models (approximate):")
             for model in sorted(approx_device_models.keys()):
                 refs = approx_device_models[model]
                 ref_desc = ", ".join(f"{r} ({t})" for r, t in refs)
-                log(f"  {model}  ({len(refs)} component(s): {ref_desc})")
+                preview_lines.append(f"  {model}  ({len(refs)} component(s): {ref_desc})")
+
+        log("=" * 60)
+        log("FULL LIST OF COMPONENTS THAT WILL NEED SOMETHING IMPORTED OR DEFINED")
+        log("=" * 60)
+        for line in preview_lines:
+            log(line)
         log("")
+
+        if preview_callback is not None:
+            try:
+                preview_callback("\n".join(preview_lines))
+            except Exception as exc:
+                log(f"  NOTE: could not show preview popup: {exc}")
 
     if not missing_by_model:
         log("No unresolved subcircuit components found via ASC map.")
@@ -5656,6 +5676,11 @@ def run_gui():
         def confirm_wrapper(resolved_paths, device_choices):
             return confirm_and_generate_gui(resolved_paths, device_choices, root)
 
+        def preview_wrapper(text):
+            messagebox.showinfo(
+                "Components needing import", text, parent=root
+            )
+
         try:
             fixup_result = process_models(
                 asc_file=asc_file,
@@ -5671,6 +5696,7 @@ def run_gui():
                 ),
                 review_choices=review_wrapper,
                 confirm_before_generating=confirm_wrapper,
+                preview_callback=preview_wrapper,
             )
         except Exception as exc:
             log(f"ERROR during model fix-up: {exc}")
