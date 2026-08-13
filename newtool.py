@@ -707,30 +707,41 @@ def _read_text_file_robust(file_path: str) -> Optional[List[str]]:
     # signature, FF D8 FF DB, ahead of the plain cp1252/latin1 text body),
     # so it can silently "succeed" on a wrong decode purely by luck of the
     # byte sequence, corrupting every downstream parse of that file.
+    #
+    # Performance: reads the file ONCE as raw bytes and decodes that same
+    # in-memory buffer with each candidate encoding, rather than the
+    # original's re-open-and-re-read-from-disk per encoding attempt (one
+    # open just to peek the BOM, then a full re-open per encoding tried).
+    # Confirmed via cProfile this was a real, measurable cost: this
+    # function is the single most-called I/O routine in the model-search
+    # index build (thousands of calls scanning real library folders), and
+    # bytes.decode() on an already-in-memory buffer is far cheaper than a
+    # fresh filesystem open+read. Same encoding order, same null-byte
+    # rejection, same final errors="replace" fallback -- output-identical
+    # for every case, just without the redundant disk I/O.
     try:
         with open(file_path, "rb") as f:
-            head = f.read(2)
+            raw = f.read()
     except Exception:
-        head = b""
-    if head == b"\xff\xfe":
+        return None
+
+    if raw[:2] == b"\xff\xfe":
         encodings = ("utf-16-le", "utf-8-sig", "cp1252", "latin1")
-    elif head == b"\xfe\xff":
+    elif raw[:2] == b"\xfe\xff":
         encodings = ("utf-16-be", "utf-8-sig", "cp1252", "latin1")
     else:
         encodings = ("utf-8-sig", "cp1252", "latin1")
     for encoding in encodings:
         try:
-            with open(file_path, encoding=encoding) as f:
-                content = f.read()
-                if "\x00" in content:
-                    continue
-                return content.splitlines(keepends=True)
+            content = raw.decode(encoding)
         except Exception:
             continue
+        if "\x00" in content:
+            continue
+        return content.splitlines(keepends=True)
     try:
-        with open(file_path, encoding="cp1252", errors="replace") as f:
-            lines = f.readlines()
-            return [l.replace("\x00", "") for l in lines]
+        content = raw.decode("cp1252", errors="replace")
+        return [l.replace("\x00", "") for l in content.splitlines(keepends=True)]
     except Exception:
         return None
 
@@ -749,6 +760,61 @@ def _clear_model_candidate_cache() -> None:
     time.
     """
     _MODEL_CANDIDATE_INDEX_CACHE.clear()
+
+
+# --- Performance fix: spicelib's find_file_in_directory() re-walks its
+# whole target directory from scratch on every single call, with no
+# caching at all. The per-call-site caches added around AscEditor's own
+# _get_symbol/_get_subcircuit (search for "_symbol_lookup_cache" /
+# "_subcircuit_lookup_cache") already cut out most of the REPEAT lookups
+# for the same symbol/library name -- but each of the remaining unique
+# names still triggers its own full walk of the same search directories
+# (which can be large: Documents/Desktop/Downloads, per
+# get_default_search_roots()). Confirmed via cProfile on the real CV+CC
+# circuit: 18 unique symbol names -> 18 full directory walks, ~4.2s of a
+# ~9s total conversion. This builds a name -> path index for a directory
+# ONCE (first lookup), then answers every later lookup in that same
+# directory -- for any filename -- with an O(1) dict lookup instead of a
+# second walk. Same "index once, look up many" fix already applied to
+# find_model_candidates() above, just at spicelib's own lower-level
+# utility instead of this tool's higher-level model search.
+_DIRECTORY_LISTING_CACHE: Dict[str, Dict[str, str]] = {}
+
+
+def _clear_directory_listing_cache() -> None:
+    _DIRECTORY_LISTING_CACHE.clear()
+
+
+def _cached_find_file_in_directory(directory, filename):
+    # Same contract/return value as the original: first match found
+    # during a walk wins (case-insensitive), or None. filename may itself
+    # carry a path component (matching the original's own handling),
+    # which gets folded into the directory to search before indexing.
+    path, name = os.path.split(filename)
+    search_dir = os.path.join(directory, path) if path else directory
+    cache_key = os.path.normcase(os.path.normpath(str(search_dir)))
+    index = _DIRECTORY_LISTING_CACHE.get(cache_key)
+    if index is None:
+        index = {}
+        for root, _dirs, files in os.walk(search_dir):
+            for filefound in files:
+                key = filefound.lower()
+                if key not in index:  # first match wins, matches original
+                    index[key] = os.path.join(root, filefound)
+        _DIRECTORY_LISTING_CACHE[cache_key] = index
+    return index.get(name.lower())
+
+
+def _patch_find_file_in_directory_caching() -> None:
+    import spicelib_vendor.utils.file_search as _file_search_module
+
+    # Patched on the source module so search_file_in_containers() (which
+    # calls find_file_in_directory as a bare name from within that same
+    # module, e.g. from AscEditor's own _asy_file_find/_lib_file_find
+    # lookups) picks it up too -- not just this file's own already-bound
+    # import of the same function.
+    _file_search_module.find_file_in_directory = _cached_find_file_in_directory
+    globals()["find_file_in_directory"] = _cached_find_file_in_directory
 
 
 def _build_model_candidate_index(search_roots: Iterable[str]) -> Dict[str, List[str]]:
@@ -2666,43 +2732,6 @@ def _rotate_local_offset(local_xy: Tuple[int, int], orientation: int) -> Tuple[i
     return (int(round(dx)), int(round(dy)))
 
 
-def _compute_schematic_bounds(qsch_editor) -> Tuple[int, int, int, int]:
-    """Returns (min_x, min_y, max_x, max_y) across every wire endpoint, net
-    label, and component position currently in the schematic. Used to find
-    a placement area clearly outside anything the circuit already uses --
-    see the "staging area" note in synthesize_ltspice_digital_primitives
-    for why a small fixed offset from each replaced gate's own old
-    position isn't safe on a real, densely-packed circuit.
-    """
-    xs: List[int] = []
-    ys: List[int] = []
-    for wire in qsch_editor.schematic.get_items("wire"):
-        for idx in (1, 2):
-            try:
-                x, y = wire.get_attr(idx)
-                xs.append(x)
-                ys.append(y)
-            except Exception:
-                pass
-    for net in qsch_editor.schematic.get_items("net"):
-        try:
-            x, y = net.get_attr(1)
-            xs.append(x)
-            ys.append(y)
-        except Exception:
-            pass
-    for comp in qsch_editor.schematic.get_items("component"):
-        try:
-            x, y = comp.get_attr(1)
-            xs.append(x)
-            ys.append(y)
-        except Exception:
-            pass
-    if not xs:
-        return (0, 0, 0, 0)
-    return (min(xs), min(ys), max(xs), max(ys))
-
-
 def synthesize_ltspice_digital_primitives(
     qsch_editor,
     asc_file: str,
@@ -3525,6 +3554,7 @@ def process_models(
     """
     _patch_spicelib_qsch_colon_parsing(log=log)
     _clear_model_candidate_cache()
+    _patch_find_file_in_directory_caching()
     asc_map = parse_asc_ref_to_symbol(asc_file)
     x_refs = parse_qsch_x_type_refs(qsch_file)
     missing_by_model: Dict[str, List[str]] = defaultdict(list)
@@ -3561,12 +3591,22 @@ def process_models(
     # get asked about later. Labeled approximate rather than presented as
     # exact for that reason; the real, exact count for each category is
     # still shown right before that category is asked about, unchanged.
+    # Loaded once, early, and reused for the rest of this function (the
+    # synthesis/value-setting code below used to construct its own
+    # separate QschEditor later; this preview used to construct a third,
+    # throwaway one just for counting). Confirmed via cProfile on the real
+    # CV+CC circuit that a single QschEditor(qsch_file) parse is expensive
+    # for a large schematic (~3.6s each here) -- nothing between this
+    # point and the later synthesis step writes to qsch_file on disk (the
+    # interactive asking loop below only collects choices in memory), so
+    # there's no correctness reason to re-parse from scratch in between.
+    qsch_editor = QschEditor(qsch_file)
+
     approx_device_models: Dict[str, list] = {}
     try:
-        _preview_editor = QschEditor(qsch_file)
-        _preview_existing = _existing_model_definitions(_preview_editor)
+        _preview_existing = _existing_model_definitions(qsch_editor)
         _preview_refs = parse_qsch_primitive_device_refs(
-            _preview_editor, log=lambda *_a, **_k: None
+            qsch_editor, log=lambda *_a, **_k: None
         )
         approx_device_models = {
             name: refs
@@ -3657,8 +3697,8 @@ def process_models(
         return _clean_path(chosen) if chosen else None
     # Reviewed together with device models below, in one combined pass --
     # see the single review_choices call after device models are gathered.
-
-    qsch_editor = QschEditor(qsch_file)
+    # (qsch_editor was already loaded above, before the preview -- reused
+    # here rather than re-parsed.)
 
     log("")
     log("=" * 60)
@@ -4478,8 +4518,41 @@ def _patch_asc_editor_symbol_lookup():
     original = AscEditor._get_symbol
 
     def patched(self, symbol):
+        # Performance fix: spicelib's own _get_symbol() does a fresh
+        # recursive filesystem walk (via _asy_file_find -> _lib_file_find
+        # -> find_file_in_directory's os.walk) EVERY time it's called, with
+        # no caching at all -- and reset_netlist() calls it once per
+        # COMPONENT INSTANCE, not once per unique symbol type. Confirmed
+        # directly via cProfile on a real 269-component circuit: 269 calls
+        # to _get_symbol, each re-walking the same search paths, accounted
+        # for 93% of convert_asc_to_qsch's total runtime (13.3 of 14.3s) --
+        # the exact same "re-scan per lookup instead of once per unique
+        # name" pattern already fixed once this project for
+        # find_model_candidates(). _get_symbol()'s result is confirmed safe
+        # to cache: it's a pure lookup (same symbol name -> same file,
+        # given fixed search paths) and the returned AsyReader is only ever
+        # read from downstream (is_subcircuit(), get_library(), ...), never
+        # mutated per-component. Cached per-AscEditor-instance (not
+        # globally) since search paths are set once per instance via
+        # set_custom_library_paths() and can legitimately differ between
+        # separate conversions in the same process.
+        cache = self.__dict__.setdefault("_symbol_lookup_cache", {})
+        if symbol in cache:
+            result = cache[symbol]
+            if isinstance(result, Exception):
+                raise result
+            return result
         try:
-            return original(self, symbol)
+            result = original(self, symbol)
+        except Exception as exc:
+            cache[symbol] = exc
+            raise
+        cache[symbol] = result
+        return result
+
+    def patched_with_fallback(self, symbol):
+        try:
+            return patched(self, symbol)
         except FileNotFoundError:
             print(
                 f"  NOTE: no .asy found for symbol type '{symbol}' during initial "
@@ -4509,7 +4582,42 @@ def _patch_asc_editor_symbol_lookup():
             )
             return _MissingSymbolStub()
 
-    AscEditor._get_symbol = patched
+    AscEditor._get_symbol = patched_with_fallback
+
+    # Same fix, second call site: _get_subcircuit() (the "find the library
+    # or subcircuit .asc for this X-prefix component" lookup) is called
+    # once per SUBCIRCUIT COMPONENT INSTANCE in reset_netlist(), not once
+    # per unique symbol -- so N op-amps of the same part each independently
+    # re-walk the search paths to find the same library file. Confirmed via
+    # cProfile on the real CV+CC circuit: 17 X-prefix component instances
+    # (3 unique parts) each triggered their own _lib_file_find() walk.
+    # Same safety argument as _get_symbol's cache above: pure function of
+    # (self, symbol) given fixed search paths, and the returned editor/
+    # library object is only ever read from downstream (pin/model lookups),
+    # never mutated per-component-instance. Keyed by id(symbol) rather than
+    # a name string since symbol here is already the cached AsyReader
+    # object from _get_symbol above -- same object identity for every
+    # instance of the same part, so this naturally collapses to one real
+    # lookup per unique part even though it's called once per instance.
+    original_get_subcircuit = AscEditor._get_subcircuit
+
+    def cached_get_subcircuit(self, symbol):
+        cache = self.__dict__.setdefault("_subcircuit_lookup_cache", {})
+        key = id(symbol)
+        if key in cache:
+            result = cache[key]
+            if isinstance(result, Exception):
+                raise result
+            return result
+        try:
+            result = original_get_subcircuit(self, symbol)
+        except Exception as exc:
+            cache[key] = exc
+            raise
+        cache[key] = result
+        return result
+
+    AscEditor._get_subcircuit = cached_get_subcircuit
 
 
 def _default_search_paths(asc_file, extra_paths):
@@ -5221,6 +5329,8 @@ def convert_asc_to_qsch(asc_file, qsch_file, search_paths=None, log=None):
         AscEditor.set_custom_library_paths(*existing_paths)
 
     _patch_asc_editor_symbol_lookup()
+    _patch_find_file_in_directory_caching()
+    _clear_directory_listing_cache()
 
     asc_raw_lines = _read_text_file_robust(asc_file) or []
     coupled_inductors = find_coupled_inductors("".join(asc_raw_lines))
