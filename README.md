@@ -8,6 +8,30 @@ Built on top of [spicelib](https://github.com/nunobrum/spicelib) by Nuno Brum.
 
 ---
 
+## Before & after
+
+Real circuits converted with this tool: the original LTspice schematic on the left, the converted QSPICE schematic on the right.
+
+**Buck converter output filter** — coupled inductors, parasitic `Rser` carried over
+
+| LTspice `.asc` (before) | QSPICE `.qsch` (after) |
+|---|---|
+| ![Buck converter filter in LTspice](docs/images/buck_filter_before.png) | ![Buck converter filter converted to QSPICE](docs/images/buck_filter_after.png) |
+
+**Seamless current measurement circuit**
+
+| LTspice `.asc` (before) | QSPICE `.qsch` (after) |
+|---|---|
+| ![Current measurement circuit in LTspice](docs/images/current_measurement_before.png) | ![Current measurement circuit converted to QSPICE](docs/images/current_measurement_after.png) |
+
+**CV+CC control loop** — ~270 components, including LTspice digital logic gates converted to behavioral sources
+
+| LTspice `.asc` (before) | QSPICE `.qsch` (after) |
+|---|---|
+| ![CV+CC circuit in LTspice](docs/images/cvcc_before.png) | ![CV+CC circuit converted to QSPICE](docs/images/cvcc_after.png) |
+
+*Click any image to view it full size.*
+
 ## What it does
 
 1. **Converts the schematic** — components, wires, net labels, orientations (including mirrored parts), values, and simulation directives.
