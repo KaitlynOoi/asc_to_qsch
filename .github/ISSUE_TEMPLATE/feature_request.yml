@@ -1,0 +1,11 @@
+name: Feature request
+description: Suggest something the converter should handle
+labels: [enhancement]
+body:
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would you like it to do?
+      description: If it's about a specific LTspice feature or component, an example circuit helps a lot.
+    validations:
+      required: true

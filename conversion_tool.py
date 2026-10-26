@@ -5912,7 +5912,7 @@ def run_cli_combined(argv: Optional[List[str]] = None) -> int:
         action="store_true",
         help="Replace '.tran ... startup' (silently ignored by QSpice) with 'uic'. Off by "
         "default -- circuit-dependent whether it's actually an improvement over doing "
-        "nothing (see README.md section 6.6).",
+        "nothing (see docs/DEVELOPER_NOTES.md section 6.6).",
     )
     args = parser.parse_args(argv)
 

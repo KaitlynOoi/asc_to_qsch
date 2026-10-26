@@ -1,0 +1,33 @@
+name: Conversion problem
+description: A circuit didn't convert or simulate correctly
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What went wrong?
+      description: What did you expect, and what happened instead? Paste any QSPICE error message.
+    validations:
+      required: true
+  - type: textarea
+    id: files
+    attributes:
+      label: Files
+      description: Drag in the .asc file (zipped is fine), any custom .asy/.lib files it needs, and the .log file written next to the output .qsch. Remove anything confidential first.
+    validations:
+      required: true
+  - type: dropdown
+    id: how
+    attributes:
+      label: How did you run it?
+      options:
+        - Windows .exe (GUI)
+        - Windows .exe (command line)
+        - Python source
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      description: LTspice version, QSPICE version, and the tool's release/commit if you know it

@@ -1,0 +1,5 @@
+# Runtime (spicelib itself is vendored in spicelib_vendor/, no pip install needed)
+numpy
+
+# Only needed to build the Windows .exe
+pyinstaller
